@@ -1,16 +1,19 @@
-cat << 'EOF' > .gitignore
-# C++ Build artifacts
-engine/build/
-engine/bin/
+# Compiled C++ Binaries
+int8_engine
+int8_engine.exe
+*.out
+*.exe
 *.o
-*.a
-*.so
+*.obj
 
-# # Python/PyTorch artifacts
-# training/data/
-# __pycache__/
-# *.pyc
-
-# OS specific files
+# Mac/OSX specific
 .DS_Store
-EOF
+
+# Generated AI Model Weights & Validation Sets
+models/fp32_model.json
+models/int8_model.json
+models/validation_set.json
+
+# If you just want to ignore ALL JSON files in the models folder, use this instead:
+# models/*.json
+
