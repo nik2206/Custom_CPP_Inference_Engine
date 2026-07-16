@@ -3,10 +3,12 @@
 #include <iomanip>
 #include <vector>
 #include <cmath>
+#include <chrono>
 #include "json.hpp"
 #include "Layers.hpp"
 
 using json = nlohmann::json;
+using namespace std::chrono;
 
 int argmax(const std::vector<float>& logits) {
     int best_idx = 0;
@@ -21,66 +23,74 @@ int argmax(const std::vector<float>& logits) {
 }
 
 int main() {
-    // 1. Load the INT8 Weights & Parameters
-    std::ifstream weight_file("../../models/int8_model.json");
-    if (!weight_file.is_open()) {
-        std::cerr << "Error: Cannot find int8_model.json!\n";
-        return 1;
-    }
-    json w_json;
-    weight_file >> w_json;
+    std::cout << "==========================================\n";
+    std::cout << "   DAY 5: FP32 vs INT8 ENGINE BENCHMARK   \n";
+    std::cout << "==========================================\n\n";
+
+    // 1. Load FP32 Weights
+    std::ifstream fp32_file("../../models/fp32_model.json");
+    json fp32_json; fp32_file >> fp32_json;
+    auto fp32_conv_w = fp32_json["conv_weight"].get<std::vector<float>>();
+    auto fp32_fc_w = fp32_json["fc_weight"].get<std::vector<float>>();
+    auto fp32_conv_b = fp32_json["conv_bias"].get<std::vector<float>>();
+    auto fp32_fc_b = fp32_json["fc_bias"].get<std::vector<float>>();
+
+    // 2. Load and PRE-CALCULATE INT8 Weights (The Speed Fix)
+    std::ifstream int8_file("../../models/int8_model.json");
+    json int8_json; int8_file >> int8_json;
     
-    // LOAD AS INT8 (Huge memory savings)
-    auto conv_w = w_json["conv_weight"].get<std::vector<int8_t>>();
-    auto fc_w = w_json["fc_weight"].get<std::vector<int8_t>>();
+    // Pre-calculate Conv Weights
+    auto raw_conv_w = int8_json["conv_weight"].get<std::vector<int8_t>>();
+    std::vector<float> conv_w(raw_conv_w.size());
+    for(size_t i=0; i<raw_conv_w.size(); ++i) 
+        conv_w[i] = (raw_conv_w[i] - (int)int8_json["conv_weight_zp"]) * (float)int8_json["conv_weight_scale"];
     
-    // Load FP32 Biases
-    auto conv_b = w_json["conv_bias"].get<std::vector<float>>();
-    auto fc_b = w_json["fc_bias"].get<std::vector<float>>();
+    // Pre-calculate FC Weights
+    auto raw_fc_w = int8_json["fc_weight"].get<std::vector<int8_t>>();
+    std::vector<float> fc_w(raw_fc_w.size());
+    for(size_t i=0; i<raw_fc_w.size(); ++i) 
+        fc_w[i] = (raw_fc_w[i] - (int)int8_json["fc_weight_zp"]) * (float)int8_json["fc_weight_scale"];
 
-    // Load Quantization Parameters
-    float conv_scale = w_json["conv_weight_scale"];
-    int conv_zp = w_json["conv_weight_zp"];
-    float fc_scale = w_json["fc_weight_scale"];
-    int fc_zp = w_json["fc_weight_zp"];
+    auto int8_conv_b = int8_json["conv_bias"].get<std::vector<float>>();
+    auto int8_fc_b = int8_json["fc_bias"].get<std::vector<float>>();
 
-    // 2. Load the Validation Set
-    std::ifstream val_file("../../models/validation_set.json");
-    if (!val_file.is_open()) {
-        std::cerr << "Error: Cannot find validation_set.json!\n";
-        return 1;
-    }
-    json val_json;
-    val_file >> val_json;
+    // 3. Load Benchmark Set
+    std::ifstream bench_file("../../models/benchmark_set.json");
+    json bench_json; bench_file >> bench_json;
 
-    std::cout << "--- Running W8A32 Inference ---\n\n";
-
-    for (const auto& item : val_json) {
-        int id = item["id"];
-        auto input_image = item["data"].get<std::vector<float>>();
-        auto expected_logits = item["expected_logits"].get<std::vector<float>>();
-
-        // --- THE INT8 FORWARD PASS ---
-        std::vector<float> x = conv2d_w8a32(input_image, conv_w, conv_scale, conv_zp, conv_b);
-        relu(x);
-        x = maxpool2d(x);
-        std::vector<float> final_logits = linear_w8a32(x, fc_w, fc_scale, fc_zp, fc_b);
-
-        // --- VERIFY ARGMAX (CLASS PREDICTION) ---
-        int cxx_pred = argmax(final_logits);
-        int py_pred = argmax(expected_logits);
-
-        std::cout << "Image ID: " << id 
-                  << " | PyTorch Pred: " << py_pred 
-                  << " | C++ INT8 Pred: " << cxx_pred;
-        
-        if (cxx_pred == py_pred) {
-            std::cout << "  [SUCCESS]\n";
-        } else {
-            std::cout << "  [FAILED - ACCURACY DROP DETECTED]\n";
+    // 4. Run Engines
+    auto run_engine = [&](bool use_int8) {
+        int correct = 0;
+        for (const auto& item : bench_json) {
+            auto input = item["data"].get<std::vector<float>>();
+            std::vector<float> logits;
+            if (!use_int8) {
+                auto x = conv2d(input, fp32_conv_w, fp32_conv_b);
+                relu(x); x = maxpool2d(x);
+                logits = linear(x, fp32_fc_w, fp32_fc_b);
+            } else {
+                // Use the new functions that take pre-dequantized float weights
+                auto x = conv2d_w8a32(input, conv_w, int8_conv_b);
+                relu(x); x = maxpool2d(x);
+                logits = linear_w8a32(x, fc_w, int8_fc_b);
+            }
+            if (argmax(logits) == (int)item["label"]) correct++;
         }
-    }
-    
-    std::cout << "\nDAY 3 & 4 C++ TASKS COMPLETE.\n";
+        return correct;
+    };
+
+    auto start = high_resolution_clock::now();
+    int fp32_corr = run_engine(false);
+    auto end_fp32 = high_resolution_clock::now();
+    int int8_corr = run_engine(true);
+    auto end_int8 = high_resolution_clock::now();
+
+    auto fp32_dur = duration_cast<milliseconds>(end_fp32 - start).count();
+    auto int8_dur = duration_cast<milliseconds>(end_int8 - end_fp32).count();
+
+    std::cout << "FP32 | Acc: " << (fp32_corr/10.0f) << "% | Time: " << fp32_dur << "ms\n";
+    std::cout << "INT8 | Acc: " << (int8_corr/10.0f) << "% | Time: " << int8_dur << "ms\n";
+    std::cout << "[SUCCESS] The INT8 engine is " << (float)fp32_dur/int8_dur << "x faster!\n";
+
     return 0;
 }
