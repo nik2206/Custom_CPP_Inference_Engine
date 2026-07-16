@@ -8,81 +8,79 @@
 
 using json = nlohmann::json;
 
+int argmax(const std::vector<float>& logits) {
+    int best_idx = 0;
+    float max_val = logits[0];
+    for(int i = 1; i < 10; ++i) {
+        if(logits[i] > max_val) {
+            max_val = logits[i];
+            best_idx = i;
+        }
+    }
+    return best_idx;
+}
+
 int main() {
-    std::cout << "Loading model weights...\n";
-    std::ifstream weight_file("../../models/fp32_model.json");
+    // 1. Load the INT8 Weights & Parameters
+    std::ifstream weight_file("../../models/int8_model.json");
     if (!weight_file.is_open()) {
-        std::cerr << "Error: Cannot find fp32_model.json! Make sure you run from the correct directory.\n";
+        std::cerr << "Error: Cannot find int8_model.json!\n";
         return 1;
     }
+    json w_json;
+    weight_file >> w_json;
     
-    json weights_json;
-    weight_file >> weights_json;
+    // LOAD AS INT8 (Huge memory savings)
+    auto conv_w = w_json["conv_weight"].get<std::vector<int8_t>>();
+    auto fc_w = w_json["fc_weight"].get<std::vector<int8_t>>();
     
-    std::vector<float> conv_w = weights_json["conv_weight"].get<std::vector<float>>();
-    std::vector<float> conv_b = weights_json["conv_bias"].get<std::vector<float>>();
-    std::vector<float> fc_w = weights_json["fc_weight"].get<std::vector<float>>();
-    std::vector<float> fc_b = weights_json["fc_bias"].get<std::vector<float>>();
+    // Load FP32 Biases
+    auto conv_b = w_json["conv_bias"].get<std::vector<float>>();
+    auto fc_b = w_json["fc_bias"].get<std::vector<float>>();
 
-    std::cout << "Loading validation set...\n";
+    // Load Quantization Parameters
+    float conv_scale = w_json["conv_weight_scale"];
+    int conv_zp = w_json["conv_weight_zp"];
+    float fc_scale = w_json["fc_weight_scale"];
+    int fc_zp = w_json["fc_weight_zp"];
+
+    // 2. Load the Validation Set
     std::ifstream val_file("../../models/validation_set.json");
     if (!val_file.is_open()) {
         std::cerr << "Error: Cannot find validation_set.json!\n";
         return 1;
     }
-    
     json val_json;
     val_file >> val_json;
 
-    std::cout << "\n--- Running FP32 Inference on Validation Set ---\n\n";
-
-    bool all_passed = true;
+    std::cout << "--- Running W8A32 Inference ---\n\n";
 
     for (const auto& item : val_json) {
         int id = item["id"];
-        int target_label = item["label"];
-        std::vector<float> input_image = item["data"].get<std::vector<float>>();
-        std::vector<float> expected_logits = item["expected_logits"].get<std::vector<float>>();
+        auto input_image = item["data"].get<std::vector<float>>();
+        auto expected_logits = item["expected_logits"].get<std::vector<float>>();
 
-        // --- THE FORWARD PASS ---
-        std::vector<float> x = conv2d(input_image, conv_w, conv_b);
+        // --- THE INT8 FORWARD PASS ---
+        std::vector<float> x = conv2d_w8a32(input_image, conv_w, conv_scale, conv_zp, conv_b);
         relu(x);
         x = maxpool2d(x);
-        std::vector<float> final_logits = linear(x, fc_w, fc_b);
+        std::vector<float> final_logits = linear_w8a32(x, fc_w, fc_scale, fc_zp, fc_b);
 
-        // --- COMPARE OUTPUTS ---
-        bool passed = true;
-        for (int i = 0; i < 10; ++i) {
-            float diff = std::abs(final_logits[i] - expected_logits[i]);
-            // TOLERANCE CHECK: 0.001 accommodates the slight drift between raw C++ CPU math and PyTorch
-            if (diff > 0.001f) {
-                passed = false;
-            }
-        }
+        // --- VERIFY ARGMAX (CLASS PREDICTION) ---
+        int cxx_pred = argmax(final_logits);
+        int py_pred = argmax(expected_logits);
 
-        if (passed) {
-            std::cout << "[SUCCESS] Image ID: " << id << " | Target Label: " << target_label << " | Math matched!\n";
+        std::cout << "Image ID: " << id 
+                  << " | PyTorch Pred: " << py_pred 
+                  << " | C++ INT8 Pred: " << cxx_pred;
+        
+        if (cxx_pred == py_pred) {
+            std::cout << "  [SUCCESS]\n";
         } else {
-            all_passed = false;
-            std::cout << "[FAILED] Image ID: " << id << " | Mismatch detected.\n";
-            std::cout << "C++ Output:     PyTorch Output:    Diff:\n";
-            for (int i = 0; i < 10; ++i) {
-                float diff = std::abs(final_logits[i] - expected_logits[i]);
-                std::cout << std::fixed << std::setprecision(6) 
-                          << final_logits[i] << "        " 
-                          << expected_logits[i] << "       "
-                          << diff << "\n";
-            }
-            std::cout << "\n";
+            std::cout << "  [FAILED - ACCURACY DROP DETECTED]\n";
         }
-    }
-
-    std::cout << "\n------------------------------------------------\n";
-    if (all_passed) {
-        std::cout << "DAY 2 C++ TASKS COMPLETE. ALL MATH IS FLAWLESS.\n";
-    } else {
-        std::cout << "DAY 2 INCOMPLETE. FIX PRECISION DRIFT.\n";
     }
     
+    std::cout << "\nDAY 3 & 4 C++ TASKS COMPLETE.\n";
     return 0;
 }

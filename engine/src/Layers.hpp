@@ -4,18 +4,19 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <cstdint> // Required for int8_t
 
 // Helper to calculate 1D index for 3D/4D tensors (NCHW format)
 inline int get_index(int c, int h, int w, int height, int width) {
     return c * (height * width) + h * width + w;
 }
 
-// 1. Conv2D (1 Input Channel, 8 Filters, 3x3 Kernel, Stride 1)
-inline std::vector<float> conv2d(const std::vector<float>& input, 
-                                 const std::vector<float>& weights, 
-                                 const std::vector<float>& bias) {
+std::vector<float> conv2d_w8a32(const std::vector<float>& input, 
+                                const std::vector<int8_t>& weights, 
+                                float scale, int zero_point,
+                                const std::vector<float>& bias) {
     int in_h = 28, in_w = 28;
-    int out_h = 26, out_w = 26; // 28 - 3 + 1
+    int out_h = 26, out_w = 26; 
     int num_filters = 8;
     
     std::vector<float> output(num_filters * out_h * out_w, 0.0f);
@@ -23,24 +24,46 @@ inline std::vector<float> conv2d(const std::vector<float>& input,
     for (int f = 0; f < num_filters; ++f) {
         for (int oh = 0; oh < out_h; ++oh) {
             for (int ow = 0; ow < out_w; ++ow) {
-                // PRECISION FIX: Use double for accumulation
-                double sum = static_cast<double>(bias[f]);
-                
-                // 3x3 Kernel loop
+                float sum = bias[f];
                 for (int kh = 0; kh < 3; ++kh) {
                     for (int kw = 0; kw < 3; ++kw) {
                         int in_idx = get_index(0, oh + kh, ow + kw, in_h, in_w);
                         int w_idx = f * 9 + kh * 3 + kw; 
                         
-                        sum += static_cast<double>(input[in_idx]) * static_cast<double>(weights[w_idx]);
+                        // --- THE MAGIC JUMP: W8A32 Dequantization ---
+                        // Weight = (Quantized_Weight - Zero_Point) * Scale
+                        float real_weight = (weights[w_idx] - zero_point) * scale;
+                        sum += input[in_idx] * real_weight;
                     }
                 }
-                
                 int out_idx = get_index(f, oh, ow, out_h, out_w);
-                // Cast back to float at the very end
-                output[out_idx] = static_cast<float>(sum);
+                output[out_idx] = sum;
             }
         }
+    }
+    return output;
+}
+
+// 2. INT8 Linear (Fully Connected) Layer
+std::vector<float> linear_w8a32(const std::vector<float>& input, 
+                                const std::vector<int8_t>& weights, 
+                                float scale, int zero_point,
+                                const std::vector<float>& bias) {
+    int in_features = 1352;
+    int out_features = 10;
+    
+    std::vector<float> output(out_features, 0.0f);
+    
+    for (int o = 0; o < out_features; ++o) {
+        float sum = bias[o];
+        for (int i = 0; i < in_features; ++i) {
+            int w_idx = o * in_features + i;
+            
+            // --- THE MAGIC JUMP: W8A32 Dequantization ---
+            float real_weight = (weights[w_idx] - zero_point) * scale;
+            sum += input[i] * real_weight;
+        }
+        output[o] = sum;
     }
     return output;
 }
