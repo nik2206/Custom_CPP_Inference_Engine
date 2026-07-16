@@ -22,7 +22,6 @@ int argmax(const std::vector<float>& logits) {
     return best_idx;
 }
 
-// Struct to hold raw memory so we don't parse JSON during the race
 struct TestImage {
     std::vector<float> data;
     int label;
@@ -41,19 +40,18 @@ int main() {
     auto fp32_conv_b = fp32_json["conv_bias"].get<std::vector<float>>();
     auto fp32_fc_b = fp32_json["fc_bias"].get<std::vector<float>>();
 
-    // 2. Load and PRE-CALCULATE INT8 Weights (Warning: This is W8A32, not true INT8 math)
+    // 2. Load TRUE INT8 Weights, Scales, and Zero-Points
     std::ifstream int8_file("../../models/int8_model.json");
     json int8_json; int8_file >> int8_json;
     
-    auto raw_conv_w = int8_json["conv_weight"].get<std::vector<int8_t>>();
-    std::vector<float> conv_w(raw_conv_w.size());
-    for(size_t i=0; i<raw_conv_w.size(); ++i) 
-        conv_w[i] = (raw_conv_w[i] - (int)int8_json["conv_weight_zp"]) * (float)int8_json["conv_weight_scale"];
+    // We NO LONGER decompress them here. We just load the raw 8-bit memory!
+    auto int8_conv_w = int8_json["conv_weight"].get<std::vector<int8_t>>();
+    float conv_scale = int8_json["conv_weight_scale"];
+    int conv_zp = int8_json["conv_weight_zp"];
     
-    auto raw_fc_w = int8_json["fc_weight"].get<std::vector<int8_t>>();
-    std::vector<float> fc_w(raw_fc_w.size());
-    for(size_t i=0; i<raw_fc_w.size(); ++i) 
-        fc_w[i] = (raw_fc_w[i] - (int)int8_json["fc_weight_zp"]) * (float)int8_json["fc_weight_scale"];
+    auto int8_fc_w = int8_json["fc_weight"].get<std::vector<int8_t>>();
+    float fc_scale = int8_json["fc_weight_scale"];
+    int fc_zp = int8_json["fc_weight_zp"];
 
     auto int8_conv_b = int8_json["conv_bias"].get<std::vector<float>>();
     auto int8_fc_b = int8_json["fc_bias"].get<std::vector<float>>();
@@ -72,12 +70,11 @@ int main() {
     }
     std::cout << "Loaded 1000 images. Starting 10x loop race...\n\n";
 
-    // 4. Run Engines (Now completely isolated from JSON)
+    // 4. Run Engines
     auto run_engine = [&](bool use_int8) {
         int correct = 0;
-        // Loop the dataset 10 times to force the CPU to work
         for (int iter = 0; iter < 10; ++iter) {
-            correct = 0; // Reset accuracy counter per iteration
+            correct = 0; 
             for (const auto& img : benchmark_images) {
                 std::vector<float> logits;
                 if (!use_int8) {
@@ -85,9 +82,10 @@ int main() {
                     relu(x); x = maxpool2d(x);
                     logits = linear(x, fp32_fc_w, fp32_fc_b);
                 } else {
-                    auto x = conv2d_w8a32(img.data, conv_w, int8_conv_b);
+                    // Pass the raw 8-bit weights, PLUS the scale and zero-point for on-the-fly math
+                    auto x = conv2d_w8a32(img.data, int8_conv_w, int8_conv_b, conv_scale, conv_zp);
                     relu(x); x = maxpool2d(x);
-                    logits = linear_w8a32(x, fc_w, int8_fc_b);
+                    logits = linear_w8a32(x, int8_fc_w, int8_fc_b, fc_scale, fc_zp);
                 }
                 if (argmax(logits) == img.label) correct++;
             }
