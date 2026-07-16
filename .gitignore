@@ -1,0 +1,16 @@
+cat << 'EOF' > .gitignore
+# C++ Build artifacts
+engine/build/
+engine/bin/
+*.o
+*.a
+*.so
+
+# # Python/PyTorch artifacts
+# training/data/
+# __pycache__/
+# *.pyc
+
+# OS specific files
+.DS_Store
+EOF
