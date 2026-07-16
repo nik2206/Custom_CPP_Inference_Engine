@@ -22,6 +22,12 @@ int argmax(const std::vector<float>& logits) {
     return best_idx;
 }
 
+// Struct to hold raw memory so we don't parse JSON during the race
+struct TestImage {
+    std::vector<float> data;
+    int label;
+};
+
 int main() {
     std::cout << "==========================================\n";
     std::cout << "   DAY 5: FP32 vs INT8 ENGINE BENCHMARK   \n";
@@ -35,17 +41,15 @@ int main() {
     auto fp32_conv_b = fp32_json["conv_bias"].get<std::vector<float>>();
     auto fp32_fc_b = fp32_json["fc_bias"].get<std::vector<float>>();
 
-    // 2. Load and PRE-CALCULATE INT8 Weights (The Speed Fix)
+    // 2. Load and PRE-CALCULATE INT8 Weights (Warning: This is W8A32, not true INT8 math)
     std::ifstream int8_file("../../models/int8_model.json");
     json int8_json; int8_file >> int8_json;
     
-    // Pre-calculate Conv Weights
     auto raw_conv_w = int8_json["conv_weight"].get<std::vector<int8_t>>();
     std::vector<float> conv_w(raw_conv_w.size());
     for(size_t i=0; i<raw_conv_w.size(); ++i) 
         conv_w[i] = (raw_conv_w[i] - (int)int8_json["conv_weight_zp"]) * (float)int8_json["conv_weight_scale"];
     
-    // Pre-calculate FC Weights
     auto raw_fc_w = int8_json["fc_weight"].get<std::vector<int8_t>>();
     std::vector<float> fc_w(raw_fc_w.size());
     for(size_t i=0; i<raw_fc_w.size(); ++i) 
@@ -54,27 +58,39 @@ int main() {
     auto int8_conv_b = int8_json["conv_bias"].get<std::vector<float>>();
     auto int8_fc_b = int8_json["fc_bias"].get<std::vector<float>>();
 
-    // 3. Load Benchmark Set
+    // 3. Load Benchmark Set AND EXTRACT JSON TO RAW MEMORY
+    std::cout << "Pre-processing JSON data into RAM...\n";
     std::ifstream bench_file("../../models/benchmark_set.json");
     json bench_json; bench_file >> bench_json;
+    
+    std::vector<TestImage> benchmark_images;
+    for (const auto& item : bench_json) {
+        benchmark_images.push_back({
+            item["data"].get<std::vector<float>>(),
+            item["label"].get<int>()
+        });
+    }
+    std::cout << "Loaded 1000 images. Starting 10x loop race...\n\n";
 
-    // 4. Run Engines
+    // 4. Run Engines (Now completely isolated from JSON)
     auto run_engine = [&](bool use_int8) {
         int correct = 0;
-        for (const auto& item : bench_json) {
-            auto input = item["data"].get<std::vector<float>>();
-            std::vector<float> logits;
-            if (!use_int8) {
-                auto x = conv2d(input, fp32_conv_w, fp32_conv_b);
-                relu(x); x = maxpool2d(x);
-                logits = linear(x, fp32_fc_w, fp32_fc_b);
-            } else {
-                // Use the new functions that take pre-dequantized float weights
-                auto x = conv2d_w8a32(input, conv_w, int8_conv_b);
-                relu(x); x = maxpool2d(x);
-                logits = linear_w8a32(x, fc_w, int8_fc_b);
+        // Loop the dataset 10 times to force the CPU to work
+        for (int iter = 0; iter < 10; ++iter) {
+            correct = 0; // Reset accuracy counter per iteration
+            for (const auto& img : benchmark_images) {
+                std::vector<float> logits;
+                if (!use_int8) {
+                    auto x = conv2d(img.data, fp32_conv_w, fp32_conv_b);
+                    relu(x); x = maxpool2d(x);
+                    logits = linear(x, fp32_fc_w, fp32_fc_b);
+                } else {
+                    auto x = conv2d_w8a32(img.data, conv_w, int8_conv_b);
+                    relu(x); x = maxpool2d(x);
+                    logits = linear_w8a32(x, fc_w, int8_fc_b);
+                }
+                if (argmax(logits) == img.label) correct++;
             }
-            if (argmax(logits) == (int)item["label"]) correct++;
         }
         return correct;
     };
@@ -90,7 +106,7 @@ int main() {
 
     std::cout << "FP32 | Acc: " << (fp32_corr/10.0f) << "% | Time: " << fp32_dur << "ms\n";
     std::cout << "INT8 | Acc: " << (int8_corr/10.0f) << "% | Time: " << int8_dur << "ms\n";
-    std::cout << "[SUCCESS] The INT8 engine is " << (float)fp32_dur/int8_dur << "x faster!\n";
+    std::cout << "[SUCCESS] The INT8 engine is " << (float)fp32_dur/(int8_dur > 0 ? int8_dur : 1) << "x faster!\n";
 
     return 0;
 }

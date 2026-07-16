@@ -6,17 +6,16 @@
 #include <iostream>
 #include <cstdint>
 
-// Helper to calculate 1D index for 3D/4D tensors (NCHW format)
 inline int get_index(int c, int h, int w, int height, int width) {
     return c * (height * width) + h * width + w;
 }
 
-
-// --- 1. Optimized INT8 Layers ---
+// --- 1. TRUE INT8 Layers (Weight-Only Quantization) ---
 
 std::vector<float> conv2d_w8a32(const std::vector<float>& input, 
-                                const std::vector<float>& weights, // Renamed to match main.cpp
-                                const std::vector<float>& bias) {  // Renamed to match main.cpp
+                                const std::vector<int8_t>& weights, // Now takes raw 8-bit integers!
+                                const std::vector<float>& bias,
+                                float scale, int zp) { 
     int in_h = 28, in_w = 28;
     int out_h = 26, out_w = 26; 
     int num_filters = 8;
@@ -24,7 +23,7 @@ std::vector<float> conv2d_w8a32(const std::vector<float>& input,
     std::vector<float> output(num_filters * out_h * out_w, 0.0f);
     
     for (int f = 0; f < num_filters; ++f) {
-        float b = bias[f]; // Correctly accessing the bias passed to the function
+        float b = bias[f]; 
         for (int oh = 0; oh < out_h; ++oh) {
             for (int ow = 0; ow < out_w; ++ow) {
                 float acc = 0.0f;
@@ -33,8 +32,9 @@ std::vector<float> conv2d_w8a32(const std::vector<float>& input,
                         int in_idx = get_index(0, oh + kh, ow + kw, in_h, in_w);
                         int w_idx = f * 9 + kh * 3 + kw; 
                         
-                        // Using 'weights' which is already pre-dequantized
-                        acc += input[in_idx] * weights[w_idx]; 
+                        // Decode the integer on the fly using your exact Scale and ZP
+                        float w = (weights[w_idx] - zp) * scale;
+                        acc += input[in_idx] * w; 
                     }
                 }
                 output[get_index(f, oh, ow, out_h, out_w)] = acc + b;
@@ -45,8 +45,9 @@ std::vector<float> conv2d_w8a32(const std::vector<float>& input,
 }
 
 std::vector<float> linear_w8a32(const std::vector<float>& input, 
-                                const std::vector<float>& weights, 
-                                const std::vector<float>& bias) {
+                                const std::vector<int8_t>& weights, // Raw integers
+                                const std::vector<float>& bias,
+                                float scale, int zp) {
     int in_features = 1352;
     int out_features = 10;
     std::vector<float> output(out_features, 0.0f);
@@ -54,7 +55,9 @@ std::vector<float> linear_w8a32(const std::vector<float>& input,
     for (int o = 0; o < out_features; ++o) {
         float acc = 0.0f;
         for (int i = 0; i < in_features; ++i) {
-            acc += input[i] * weights[o * in_features + i];
+            // Decode on the fly
+            float w = (weights[o * in_features + i] - zp) * scale;
+            acc += input[i] * w;
         }
         output[o] = acc + bias[o];
     }
@@ -69,9 +72,7 @@ inline std::vector<float> conv2d(const std::vector<float>& input,
     int in_h = 28, in_w = 28;
     int out_h = 26, out_w = 26; 
     int num_filters = 8;
-    
     std::vector<float> output(num_filters * out_h * out_w, 0.0f);
-    
     for (int f = 0; f < num_filters; ++f) {
         for (int oh = 0; oh < out_h; ++oh) {
             for (int ow = 0; ow < out_w; ++ow) {
@@ -83,8 +84,7 @@ inline std::vector<float> conv2d(const std::vector<float>& input,
                         sum += input[in_idx] * weights[w_idx];
                     }
                 }
-                int out_idx = get_index(f, oh, ow, out_h, out_w);
-                output[out_idx] = sum;
+                output[get_index(f, oh, ow, out_h, out_w)] = sum;
             }
         }
     }
@@ -96,9 +96,7 @@ inline std::vector<float> linear(const std::vector<float>& input,
                                  const std::vector<float>& bias) {
     int in_features = 1352;
     int out_features = 10;
-    
     std::vector<float> output(out_features, 0.0f);
-    
     for (int o = 0; o < out_features; ++o) {
         double sum = static_cast<double>(bias[o]);
         for (int i = 0; i < in_features; ++i) {
@@ -120,9 +118,7 @@ inline void relu(std::vector<float>& tensor) {
 inline std::vector<float> maxpool2d(const std::vector<float>& input) {
     int in_c = 8, in_h = 26, in_w = 26;
     int out_h = 13, out_w = 13; 
-    
     std::vector<float> output(in_c * out_h * out_w, 0.0f);
-    
     for (int c = 0; c < in_c; ++c) {
         for (int oh = 0; oh < out_h; ++oh) {
             for (int ow = 0; ow < out_w; ++ow) {
@@ -133,8 +129,7 @@ inline std::vector<float> maxpool2d(const std::vector<float>& input) {
                         max_val = std::max(max_val, input[in_idx]);
                     }
                 }
-                int out_idx = get_index(c, oh, ow, out_h, out_w);
-                output[out_idx] = max_val;
+                output[get_index(c, oh, ow, out_h, out_w)] = max_val;
             }
         }
     }
