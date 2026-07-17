@@ -6,6 +6,9 @@ int8_engine.exe
 *.o
 *.obj
 
+# CMake build directory
+engine/build/
+
 # Mac/OSX specific
 .DS_Store
 
@@ -16,4 +19,3 @@ models/validation_set.json
 
 # If you just want to ignore ALL JSON files in the models folder, use this instead:
 # models/*.json
-
